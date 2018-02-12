@@ -83,7 +83,7 @@ namespace SimpleSourceProtector
 
         static void HelpMsg(string arg = "")
         {
-            Console.WriteLine(@"Usage: SimpleSourceProtector [Options] ""fullfilepath\project.cproj"" [output]
+            Console.WriteLine(@"Usage: SimpleSourceProtector [Options] ""FullFilePath\Project.cproj"" [output]
   * if the output parameter is not specified, a ""output"" folder will be created inside the program directory
 Options:
     -h      show this page
