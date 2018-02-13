@@ -9,12 +9,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using static SimpleSourceProtector.Program;
 
 namespace SimpleSourceProtector
 {
     class Loader
     {
-        public int Process(string projectPath, string outputPath, bool compileBefore = false, bool rename = true, bool single = true)
+        public int Process(string projectPath, string outputPath, bool compileBefore = false, ObfuscationOptions obfuscationOptions = ObfuscationOptions.ALL, bool single = true, bool minify = true)
         {
             #region Creating new project from exist
             MSBuildWorkspace workspace = MSBuildWorkspace.Create();
@@ -75,9 +76,9 @@ namespace SimpleSourceProtector
 
             #region Renaming
             var documents = solution.Projects.SelectMany(x => x.Documents).Select(x => x.Id).ToList();
-            if (rename)
+            if (obfuscationOptions != ObfuscationOptions.NONE)
                 using (Watcher.Start(ts => Console.WriteLine("Renaming took: " + ts.ToString() + "\n")))
-                    solution = ObfuscateNames(solution, documents);
+                    solution = ObfuscateNames(solution, documents, obfuscationOptions);
             #endregion
 
             #region Second comiling test
@@ -102,9 +103,9 @@ namespace SimpleSourceProtector
                     docs.AddRange(prj.Documents);
                     outSolution = outSolution.AddMetadataReferences(projectId, prj.MetadataReferences);
                 }
-                outSolution = outSolution.AddDocument(DocumentId.CreateNewId(projectId), "single", ToSingleDoc(docs, outputPath));
+                outSolution = outSolution.AddDocument(DocumentId.CreateNewId(projectId), Path.GetFileNameWithoutExtension(projectPath), ToSingleDoc(docs, outputPath));
                 documents = outSolution.Projects.SelectMany(x => x.Documents).Select(x => x.Id).ToList();
-                
+
             }
 
             using (Watcher.Start(ts => Console.WriteLine("Post compilling took: " + ts.ToString() + "\n")))
@@ -142,17 +143,17 @@ namespace SimpleSourceProtector
                 foreach (var documentId in documents)
                 {
                     var document = outSolution.GetDocument(documentId);
-                    if (document.Name.Contains(".NETFramework")) continue; 
+                    if (document.Name.Contains(".NETFramework")) continue;
 
                     var model = document.GetSemanticModelAsync().Result;
                     var syntax = document.GetSyntaxRootAsync().Result;
 
                     Rewriter rewriter = new Rewriter(model);
-                    SyntaxNode newSource = rewriter.Visit(syntax);
+                    SyntaxNode newSource = (minify) ? rewriter.Visit(syntax) : syntax;
 
-                    var newPath = Path.Combine(outputPath, Utils.RandomString() + ".cs");
+                    var newPath = Path.Combine(outputPath, (((obfuscationOptions & ObfuscationOptions.FILENAMES) == 0) ? document.Name : Utils.RandomString()) + ".cs");
                     Console.WriteLine("WRITING: " + document.Name + " as " + newPath);
-                    File.WriteAllText(newPath, Utils.Unformat(newSource.ToFullString()));
+                    File.WriteAllText(newPath, (minify) ? Utils.Unformat(newSource.ToFullString()) : newSource.ToFullString());
                 }
             }
 
@@ -161,104 +162,156 @@ namespace SimpleSourceProtector
             return 0;
         }
 
-        private static Solution ObfuscateNames(Solution solution, List<DocumentId> documents)
+        private static Solution ObfuscateNames(Solution solution, List<DocumentId> documents, ObfuscationOptions obfuscationOptions)
         {
             #region RENAMER
 
             #region Rename classes
-            Console.WriteLine("----------------------------------CLASSES----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
+            if ((obfuscationOptions & ObfuscationOptions.CLASS) != 0)
             {
-
-                foreach (var documentId in documents)
+                Console.WriteLine("----------------------------------CLASSES----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
                 {
-                    while (true)
+
+                    foreach (var documentId in documents)
                     {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        var classes = syntax.DescendantNodes()
-                          .OfType<ClassDeclarationSyntax>()
-                          .Where(x => !x.Identifier.ValueText.StartsWith("_") && x.Identifier.ValueText.IndexOf("ignore", StringComparison.OrdinalIgnoreCase) < 0)
-                          .ToList();
+                        while (true)
+                        {
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            var classes = syntax.DescendantNodes()
+                              .OfType<ClassDeclarationSyntax>()
+                              .Where(x => !x.Identifier.ValueText.StartsWith("_") && x.Identifier.ValueText.IndexOf("ignore", StringComparison.OrdinalIgnoreCase) < 0)
+                              .ToList();
 
-                        var cl = classes.FirstOrDefault();
-                        if (cl == null)
-                            break;
-                        var symbol = model.GetDeclaredSymbol(cl);
-                        var newName = "_" + Utils.RandomString();
-                        Console.WriteLine("Renaming class: " + cl.Identifier.ValueText + " to " + newName);
-                        solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                            var cl = classes.FirstOrDefault();
+                            if (cl == null)
+                                break;
+                            var symbol = model.GetDeclaredSymbol(cl);
+                            var newName = "_" + Utils.RandomString();
+                            Console.WriteLine("Renaming class: " + cl.Identifier.ValueText + " to " + newName);
+                            solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                        }
+
                     }
-
                 }
             }
             #endregion
 
             #region Rename methods
-            Console.WriteLine("----------------------------------METHODS----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
+            if ((obfuscationOptions & ObfuscationOptions.METHODS) != 0)
             {
-                foreach (var documentId in documents)
+                Console.WriteLine("----------------------------------METHODS----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
                 {
-                    List<MethodDeclarationSyntax> methods;
-                    int i;
-                    do
+                    foreach (var documentId in documents)
                     {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        methods = syntax.DescendantNodes()
-                          .OfType<MethodDeclarationSyntax>()
-                          .Where(x => !x.Identifier.ValueText.StartsWith("_") && !x.Identifier.ToString().Equals("dispose", StringComparison.OrdinalIgnoreCase) && x.Modifiers.Count(z => z.IsKind(SyntaxKind.ProtectedKeyword) || z.IsKind(SyntaxKind.OverrideKeyword)) == 0)
-                          .ToList();
-
-                        for (i = 0; i < methods.Count; i++)
+                        List<MethodDeclarationSyntax> methods;
+                        int i;
+                        do
                         {
-                            var ms = methods[i];
-                            var symbol = model.GetDeclaredSymbol(ms);
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            methods = syntax.DescendantNodes()
+                              .OfType<MethodDeclarationSyntax>()
+                              .Where(x => !x.Identifier.ValueText.StartsWith("_") && !x.Identifier.ToString().Equals("dispose", StringComparison.OrdinalIgnoreCase) && x.Modifiers.Count(z => z.IsKind(SyntaxKind.ProtectedKeyword) || z.IsKind(SyntaxKind.OverrideKeyword)) == 0)
+                              .ToList();
 
-                            if (ms.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
-                                continue;
+                            for (i = 0; i < methods.Count; i++)
+                            {
+                                var ms = methods[i];
+                                var symbol = model.GetDeclaredSymbol(ms);
 
-                            var refcount = 0;
-                            foreach (var rf in SymbolFinder.FindReferencesAsync(symbol, doc.Project.Solution).Result)
-                                refcount += rf.Locations.Count();
-                            if (refcount <= 0) continue;
+                                if (ms.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    continue;
 
-                            var newName = "_" + Utils.RandomString();
-                            Console.WriteLine("Renaming method (" + refcount + "): " + ms.Identifier.ValueText + " to " + newName + $" {ms.Kind()} {string.Join(",", ms.Modifiers)}");
-                            solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
-                            break;
-                        }
-                    } while (i < methods.Count);
+                                var refcount = 0;
+                                foreach (var rf in SymbolFinder.FindReferencesAsync(symbol, doc.Project.Solution).Result)
+                                    refcount += rf.Locations.Count();
+                                if (refcount <= 0) continue;
+
+                                var newName = "_" + Utils.RandomString();
+                                Console.WriteLine("Renaming method (" + refcount + "): " + ms.Identifier.ValueText + " to " + newName + $" {ms.Kind()} {string.Join(",", ms.Modifiers)}");
+                                solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                                break;
+                            }
+                        } while (i < methods.Count);
+                    }
                 }
             }
             #endregion
 
             #region Rename variables
-            Console.WriteLine("----------------------------------VARS&FIELDS----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
+            if ((obfuscationOptions & ObfuscationOptions.VARS) != 0)
             {
-                foreach (var documentId in documents)
+                Console.WriteLine("----------------------------------VARS&FIELDS----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
                 {
-                    List<VariableDeclarationSyntax> vars;
-                    int i;
-                    do
+                    foreach (var documentId in documents)
                     {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        vars = syntax.DescendantNodes()
-                          .OfType<VariableDeclarationSyntax>()
-                          .Where(x => x.Variables.Count(z => !z.Identifier.ValueText.StartsWith("_")) > 0)
-                          .ToList();
-
-                        for (i = 0; i < vars.Count; i++)
+                        List<VariableDeclarationSyntax> vars;
+                        int i;
+                        do
                         {
-                            bool end = true;
-                            foreach (var vr in vars[i].Variables)
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            vars = syntax.DescendantNodes()
+                              .OfType<VariableDeclarationSyntax>()
+                              .Where(x => x.Variables.Count(z => !z.Identifier.ValueText.StartsWith("_")) > 0)
+                              .ToList();
+
+                            for (i = 0; i < vars.Count; i++)
                             {
+                                bool end = true;
+                                foreach (var vr in vars[i].Variables)
+                                {
+                                    if (vr.Identifier.ValueText.StartsWith("_")) continue;
+
+                                    var symbol = model.GetDeclaredSymbol(vr);
+
+                                    if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
+                                        continue;
+
+                                    var newName = "_" + Utils.RandomString();
+                                    Console.WriteLine("Renaming variable: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
+                                    solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                                    end = true;
+                                    break;
+                                }
+                                if (end) break;
+                            }
+                        } while (i < vars.Count);
+                    }
+                }
+            }
+            #endregion
+
+            if ((obfuscationOptions & ObfuscationOptions.OTHERS) != 0)
+            {
+                #region Rename Enums
+                Console.WriteLine("----------------------------------ENUMS----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
+                {
+                    foreach (var documentId in documents)
+                    {
+                        List<EnumDeclarationSyntax> vars;
+                        int i;
+                        do
+                        {
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            vars = syntax.DescendantNodes()
+                              .OfType<EnumDeclarationSyntax>()
+                              .Where(x => !x.Identifier.ValueText.StartsWith("_"))
+                              .ToList();
+
+                            for (i = 0; i < vars.Count; i++)
+                            {
+                                var vr = vars[i];
                                 if (vr.Identifier.ValueText.StartsWith("_")) continue;
 
                                 var symbol = model.GetDeclaredSymbol(vr);
@@ -267,130 +320,90 @@ namespace SimpleSourceProtector
                                     continue;
 
                                 var newName = "_" + Utils.RandomString();
-                                Console.WriteLine("Renaming variable: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
+                                Console.WriteLine("Renaming ENUM: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
                                 solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
-                                end = true;
                                 break;
                             }
-                            if (end) break;
-                        }
-                    } while (i < vars.Count);
+                        } while (i < vars.Count);
+                    }
                 }
-            }
-            #endregion
 
-            #region Rename Enums
-            Console.WriteLine("----------------------------------ENUMS----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
-            {
-                foreach (var documentId in documents)
+                Console.WriteLine("----------------------------------ENUM MEMBERS----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
                 {
-                    List<EnumDeclarationSyntax> vars;
-                    int i;
-                    do
+                    foreach (var documentId in documents)
                     {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        vars = syntax.DescendantNodes()
-                          .OfType<EnumDeclarationSyntax>()
-                          .Where(x => !x.Identifier.ValueText.StartsWith("_"))
-                          .ToList();
-
-                        for (i = 0; i < vars.Count; i++)
+                        List<EnumMemberDeclarationSyntax> vars;
+                        int i;
+                        do
                         {
-                            var vr = vars[i];
-                            if (vr.Identifier.ValueText.StartsWith("_")) continue;
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            vars = syntax.DescendantNodes()
+                              .OfType<EnumMemberDeclarationSyntax>()
+                              .Where(x => !x.Identifier.ValueText.StartsWith("_"))
+                              .ToList();
 
-                            var symbol = model.GetDeclaredSymbol(vr);
+                            for (i = 0; i < vars.Count; i++)
+                            {
+                                var vr = vars[i];
+                                if (vr.Identifier.ValueText.StartsWith("_")) continue;
 
-                            if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
-                                continue;
+                                var symbol = model.GetDeclaredSymbol(vr);
 
-                            var newName = "_" + Utils.RandomString();
-                            Console.WriteLine("Renaming ENUM: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
-                            solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
-                            break;
-                        }
-                    } while (i < vars.Count);
+                                if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    continue;
+
+                                var newName = "_" + Utils.RandomString();
+                                Console.WriteLine("Renaming ENUM member: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
+                                solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                                break;
+                            }
+                        } while (i < vars.Count);
+                    }
                 }
-            }
 
-            Console.WriteLine("----------------------------------ENUM MEMBERS----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
-            {
-                foreach (var documentId in documents)
+                #endregion
+
+                #region Rename Structs
+                Console.WriteLine("----------------------------------STRUCTS----------------------------------");
+                using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
                 {
-                    List<EnumMemberDeclarationSyntax> vars;
-                    int i;
-                    do
+                    foreach (var documentId in documents)
                     {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        vars = syntax.DescendantNodes()
-                          .OfType<EnumMemberDeclarationSyntax>()
-                          .Where(x => !x.Identifier.ValueText.StartsWith("_"))
-                          .ToList();
-
-                        for (i = 0; i < vars.Count; i++)
+                        List<StructDeclarationSyntax> vars;
+                        int i;
+                        do
                         {
-                            var vr = vars[i];
-                            if (vr.Identifier.ValueText.StartsWith("_")) continue;
+                            var doc = solution.GetDocument(documentId);
+                            var model = doc.GetSemanticModelAsync().Result;
+                            var syntax = doc.GetSyntaxRootAsync().Result;
+                            vars = syntax.DescendantNodes()
+                              .OfType<StructDeclarationSyntax>()
+                              .Where(x => !x.Identifier.ValueText.StartsWith("_"))
+                              .ToList();
 
-                            var symbol = model.GetDeclaredSymbol(vr);
+                            for (i = 0; i < vars.Count; i++)
+                            {
+                                var vr = vars[i];
+                                if (vr.Identifier.ValueText.StartsWith("_")) continue;
 
-                            if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
-                                continue;
+                                var symbol = model.GetDeclaredSymbol(vr);
 
-                            var newName = "_" + Utils.RandomString();
-                            Console.WriteLine("Renaming ENUM member: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
-                            solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
-                            break;
-                        }
-                    } while (i < vars.Count);
+                                if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
+                                    continue;
+
+                                var newName = "_" + Utils.RandomString();
+                                Console.WriteLine("Renaming STRUCTS: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
+                                solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
+                                break;
+                            }
+                        } while (i < vars.Count);
+                    }
                 }
+                #endregion
             }
-
-            #endregion
-
-            #region Rename Structs
-            Console.WriteLine("----------------------------------STRUCTS----------------------------------");
-            using (Watcher.Start(ts => Console.WriteLine("Timed: " + ts.ToString())))
-            {
-                foreach (var documentId in documents)
-                {
-                    List<StructDeclarationSyntax> vars;
-                    int i;
-                    do
-                    {
-                        var doc = solution.GetDocument(documentId);
-                        var model = doc.GetSemanticModelAsync().Result;
-                        var syntax = doc.GetSyntaxRootAsync().Result;
-                        vars = syntax.DescendantNodes()
-                          .OfType<StructDeclarationSyntax>()
-                          .Where(x => !x.Identifier.ValueText.StartsWith("_"))
-                          .ToList();
-
-                        for (i = 0; i < vars.Count; i++)
-                        {
-                            var vr = vars[i];
-                            if (vr.Identifier.ValueText.StartsWith("_")) continue;
-
-                            var symbol = model.GetDeclaredSymbol(vr);
-
-                            if (vr.GetLeadingTrivia().ToString().IndexOf("ignore", StringComparison.OrdinalIgnoreCase) >= 0)
-                                continue;
-
-                            var newName = "_" + Utils.RandomString();
-                            Console.WriteLine("Renaming STRUCTS: " + vr.Identifier.ValueText + " to " + newName + $" {vr.Kind()}");
-                            solution = Renamer.RenameSymbolAsync(solution, symbol, newName, null).Result;
-                            break;
-                        }
-                    } while (i < vars.Count);
-                }
-            }
-            #endregion
 
             return solution;
             #endregion
@@ -402,7 +415,7 @@ namespace SimpleSourceProtector
             List<string> sources = new List<string>();
             foreach (var document in documents)
             {
-                if (document.Name.Contains(".NETFramework")) continue; 
+                if (document.Name.Contains(".NETFramework")) continue;
 
                 var model = document.GetSemanticModelAsync().Result;
                 var syntax = document.GetSyntaxRootAsync().Result;
